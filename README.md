@@ -1,5 +1,4 @@
-# TPM-Spoofer-Src
-TPM Spoofer Src
+# TPM-IRP-HOOK-Src
 
 - tpm hook: tpm-hook/tpm-hook/tpm-hook/x64/TpmSpoofer.sys
 - kdmapper: kdmapper/kdmapper/x64/Debug/Mapper.exe
