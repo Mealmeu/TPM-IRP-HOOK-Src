@@ -2,32 +2,14 @@
 #include "global.h"
 #include <ntddk.h>
 
-void GenerateRandomData(char* buffer, size_t length)
-{
-    ULONG seed = (ULONG)KeQueryTimeIncrement();
-    for (size_t i = 0; i < length; i++) {
-        buffer[i] = (char)(RtlRandomEx(&seed) % 256);
-    }
-}
-
-void SpoofTPMResponse(PIRP irp) {
-    PVOID systemBuffer = irp->AssociatedIrp.SystemBuffer;
-
-    if (systemBuffer) {
-        size_t length = irp->IoStatus.Information;
-        if (length > 0) {
-            GenerateRandomData((char*)systemBuffer, length);
-        }
-    }
-
-    irp->IoStatus.Status = STATUS_SUCCESS;
-    IoCompleteRequest(irp, IO_NO_INCREMENT);
-}
+// 100ms in 100-nanosecond intervals (negative = relative time)
+#define MAINTAIN_HOOK_INTERVAL_MS 100
+#define MAINTAIN_HOOK_INTERVAL (-(LONGLONG)(MAINTAIN_HOOK_INTERVAL_MS) * 10000LL)
 
 void MaintainHook(PDRIVER_OBJECT driverObject) {
-    static PDRIVER_DISPATCH* functionBase = driverObject->MajorFunction;
+    static PDRIVER_DISPATCH savedDispatch = driverObject->MajorFunction[0];
 
-    if (functionBase != driverObject->MajorFunction) {
+    if (driverObject->MajorFunction[0] != &Hook::Dispatch) {
         for (DWORD i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++) {
             driverObject->MajorFunction[i] = &Hook::Dispatch;
         }
@@ -39,10 +21,10 @@ EXTERN_C NTSTATUS Entry()
 {
     Log("Entry at 0x%p", &Entry);
 
-    NTSTATUS status = Utils::GenerateRandomKey(&Hook::generatedKey);
+    NTSTATUS status = Utils::LoadOrGenerateKey(&Hook::generatedKey);
     if (!NT_SUCCESS(status))
     {
-        Log("Failed to generate random key");
+        Log("Failed to load/generate EK");
         return status;
     }
 
@@ -65,10 +47,13 @@ EXTERN_C NTSTATUS Entry()
     }
 
     Log("Dispatch hooked");
-    Log("Made By OF");
+
+    LARGE_INTEGER interval;
+    interval.QuadPart = MAINTAIN_HOOK_INTERVAL;
 
     while (TRUE) {
         MaintainHook(driverObject);
+        KeDelayExecutionThread(KernelMode, FALSE, &interval);
     }
 
     return STATUS_SUCCESS;

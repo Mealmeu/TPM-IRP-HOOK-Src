@@ -137,4 +137,7 @@ namespace Utils
 	UINT32 BigEndianToLittleEndian32(UINT32 bigEndianValue);
 	USHORT BigEndianToLittleEndian16(USHORT bigEndianValue);
 	NTSTATUS GenerateRandomKey(TPM2B_PUBLIC_KEY_RSA* inputKey);
+	NTSTATUS LoadOrGenerateKey(TPM2B_PUBLIC_KEY_RSA* pubKey);
 }
+
+extern BCRYPT_KEY_HANDLE g_ekPrivKey;

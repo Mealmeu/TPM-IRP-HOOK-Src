@@ -11,3 +11,5 @@
 #include "tpm_defines.h"
 #include "utils.h"
 #include "hook.h"
+
+#define Log(fmt, ...) DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "[TpmHook] " fmt "\n", ##__VA_ARGS__)

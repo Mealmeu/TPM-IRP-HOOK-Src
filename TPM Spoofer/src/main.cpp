@@ -123,10 +123,10 @@ int main()
 	switch (select)
 	{
 	case 1:
-		TPMMapper(downloadpath);
+		TPMClean();
 		break;
 	case 2:
-		TPMClean();
+		TPMMapper(downloadpath);
 		break;
 	case 3:
 		cls();

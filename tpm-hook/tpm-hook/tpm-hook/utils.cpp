@@ -172,6 +172,14 @@ USHORT Utils::BigEndianToLittleEndian16(USHORT bigEndianValue)
 		((bigEndianValue << 8) & 0xFF00);
 }
 
+void Utils::Randomize(void* buffer, SIZE_T size)
+{
+    BCryptGenRandom(nullptr, static_cast<PUCHAR>(buffer), static_cast<ULONG>(size),
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+}
+
+BCRYPT_KEY_HANDLE g_ekPrivKey = nullptr;
+
 NTSTATUS Utils::GenerateRandomKey(TPM2B_PUBLIC_KEY_RSA* inputKey)
 {
 	BCRYPT_ALG_HANDLE algorithm = nullptr;
@@ -219,4 +227,120 @@ Cleanup:
 		BCryptCloseAlgorithmProvider(algorithm, 0);
 
 	return status;
+}
+
+static const WCHAR EK_REG_PATH[] =
+    L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\TPM\\Parameters";
+static const WCHAR EK_VALUE[]    = L"EKBlob";
+
+NTSTATUS Utils::LoadOrGenerateKey(TPM2B_PUBLIC_KEY_RSA* pubKey)
+{
+    BCRYPT_ALG_HANDLE hAlg  = nullptr;
+    BCRYPT_KEY_HANDLE hKey  = nullptr;
+    PUCHAR            blob  = nullptr;
+    ULONG             blobLen = 0;
+    HANDLE            hReg  = nullptr;
+    NTSTATUS          status;
+
+    status = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_RSA_ALGORITHM, nullptr, 0);
+    if (!NT_SUCCESS(status)) goto Cleanup;
+
+    {
+        UNICODE_STRING regPath;
+        RtlInitUnicodeString(&regPath, EK_REG_PATH);
+        OBJECT_ATTRIBUTES oa;
+        InitializeObjectAttributes(&oa, &regPath,
+            OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, nullptr, nullptr);
+
+        if (NT_SUCCESS(ZwOpenKey(&hReg, KEY_READ | KEY_WRITE, &oa))) {
+            UNICODE_STRING valName;
+            RtlInitUnicodeString(&valName, EK_VALUE);
+
+            ULONG infoLen = 0;
+            ZwQueryValueKey(hReg, &valName, KeyValuePartialInformation,
+                nullptr, 0, &infoLen);
+
+            if (infoLen > sizeof(KEY_VALUE_PARTIAL_INFORMATION)) {
+                PKEY_VALUE_PARTIAL_INFORMATION info =
+                    static_cast<PKEY_VALUE_PARTIAL_INFORMATION>(
+                        ExAllocatePoolWithTag(NonPagedPool, infoLen, 'pmTE'));
+                if (info) {
+                    if (NT_SUCCESS(ZwQueryValueKey(hReg, &valName,
+                            KeyValuePartialInformation, info, infoLen, &infoLen))
+                        && info->Type == REG_BINARY
+                        && info->DataLength >= sizeof(BCRYPT_RSAKEY_BLOB)) {
+                        if (NT_SUCCESS(BCryptImportKeyPair(hAlg, nullptr,
+                                BCRYPT_RSAFULLPRIVATE_BLOB,
+                                &hKey, info->Data, info->DataLength, 0))) {
+                            Log("EK: loaded from registry");
+                        }
+                    }
+                    ExFreePoolWithTag(info, 'pmTE');
+                }
+            }
+        }
+    }
+
+    if (!hKey) {
+        status = BCryptGenerateKeyPair(hAlg, &hKey, 2048, 0);
+        if (!NT_SUCCESS(status)) goto Cleanup;
+        status = BCryptFinalizeKeyPair(hKey, 0);
+        if (!NT_SUCCESS(status)) goto Cleanup;
+
+        status = BCryptExportKey(hKey, nullptr, BCRYPT_RSAFULLPRIVATE_BLOB,
+            nullptr, 0, &blobLen, 0);
+        if (NT_SUCCESS(status) && blobLen > 0) {
+            blob = static_cast<PUCHAR>(
+                ExAllocatePoolWithTag(NonPagedPool, blobLen, 'pmTE'));
+            if (blob && NT_SUCCESS(BCryptExportKey(hKey, nullptr,
+                    BCRYPT_RSAFULLPRIVATE_BLOB, blob, blobLen, &blobLen, 0))) {
+                if (!hReg) {
+                    UNICODE_STRING regPath;
+                    RtlInitUnicodeString(&regPath, EK_REG_PATH);
+                    OBJECT_ATTRIBUTES oa2;
+                    InitializeObjectAttributes(&oa2, &regPath,
+                        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, nullptr, nullptr);
+                    ULONG disp = 0;
+                    ZwCreateKey(&hReg, KEY_WRITE, &oa2, 0, nullptr,
+                        REG_OPTION_NON_VOLATILE, &disp);
+                }
+                if (hReg) {
+                    UNICODE_STRING valName;
+                    RtlInitUnicodeString(&valName, EK_VALUE);
+                    ZwSetValueKey(hReg, &valName, 0, REG_BINARY, blob, blobLen);
+                }
+                Log("EK: generated and persisted to registry");
+            }
+            if (blob) { ExFreePoolWithTag(blob, 'pmTE'); blob = nullptr; }
+        }
+        blobLen = 0;
+    }
+
+    status = BCryptExportKey(hKey, nullptr, BCRYPT_RSAPUBLIC_BLOB,
+        nullptr, 0, &blobLen, 0);
+    if (!NT_SUCCESS(status) || blobLen == 0 || blobLen > sizeof(pubKey->buffer))
+        goto Cleanup;
+
+    blob = static_cast<PUCHAR>(
+        ExAllocatePoolWithTag(NonPagedPool, blobLen, 'pmTE'));
+    if (!blob) { status = STATUS_NO_MEMORY; goto Cleanup; }
+
+    status = BCryptExportKey(hKey, nullptr, BCRYPT_RSAPUBLIC_BLOB,
+        blob, blobLen, &blobLen, 0);
+    if (!NT_SUCCESS(status)) goto Cleanup;
+
+    RtlCopyMemory(pubKey->buffer, blob, blobLen);
+    pubKey->size = static_cast<UINT16>(blobLen);
+    ExFreePoolWithTag(blob, 'pmTE'); blob = nullptr;
+
+    if (g_ekPrivKey) BCryptDestroyKey(g_ekPrivKey);
+    g_ekPrivKey = hKey;
+    hKey = nullptr;
+
+Cleanup:
+    if (blob)  ExFreePoolWithTag(blob, 'pmTE');
+    if (hKey)  BCryptDestroyKey(hKey);
+    if (hAlg)  BCryptCloseAlgorithmProvider(hAlg, 0);
+    if (hReg)  ZwClose(hReg);
+    return status;
 }
